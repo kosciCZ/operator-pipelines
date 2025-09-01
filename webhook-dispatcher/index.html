@@ -16,7 +16,7 @@
     
     
       
-        <title>Developer Guide - Red Hat OpenShift Operators</title>
+        <title>Webhook Dispatcher - Red Hat OpenShift Operators</title>
       
     
     
@@ -58,7 +58,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#developer-guide" class="md-skip">
+        <a href="#webhook-dispatcher" class="md-skip">
           Skip to content
         </a>
       
@@ -92,7 +92,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Developer Guide
+              Webhook Dispatcher
             
           </span>
         </div>
@@ -980,305 +980,151 @@
   
 
 
-<h1 id="developer-guide">Developer Guide</h1>
-<h2 id="workflow">Workflow</h2>
+<h1 id="webhook-dispatcher">Webhook Dispatcher</h1>
+<p>The Webhook Dispatcher is a microservice that receives GitHub webhooks and processes them for operator pipelines.
+It validates webhooks, stores events in a database, and triggers Tekton pipelines for operator pipelines with
+a capacity management system.</p>
+<h2 id="overview">Overview</h2>
+<p>The Webhook Dispatcher serves as the entry point for GitHub events in the operator pipelines.
+When developers submit operators via pull requests, the dispatcher:</p>
 <ol>
-<li><a href="#setup">Run through the setup</a> at least once.</li>
-<li><a href="#making-changes-to-the-pipeline-image">Make changes to the pipeline image</a>,
-   if desired.</li>
-<li><a href="#making-changes-to-the-pipelines">Make changes to the Tekton pipelines and/or tasks</a>,
-   if desired.</li>
-<li><a href="../README.md#usage">Test all impacted pipelines</a>.</li>
-<li><a href="../README.md#using-a-custom-pipeline-image">Override the pipeline image as necessary</a>.</li>
-<li>Submit a pull request with your changes.</li>
+<li><strong>Receives and validates</strong> GitHub webhooks with signature verification</li>
+<li><strong>Stores webhook events</strong> in a PostgreSQL database</li>
+<li><strong>Manages pipeline capacity</strong> to prevent resource exhaustion</li>
+<li><strong>Triggers Tekton pipelines</strong> for operator validation</li>
 </ol>
-<h2 id="setup">Setup</h2>
-<ol>
-<li><a href="#git-leaks-detection">Git leaks detection</a></li>
-<li><a href="#prepare-a-development-environment">Prepare a development environment</a></li>
-<li><a href="#prepare-a-certification-project">Prepare a certification project</a></li>
-<li><a href="#prepare-an-operator-bundle">Prepare an Operator bundle</a></li>
-<li><a href="#prepare-your-ciyaml">Prepare your <code>ci.yaml</code></a></li>
-<li><a href="#create-a-bundle-pull-request">Create a bundle pull request</a> (optional)</li>
-<li>Required for testing hosted or release pipelines</li>
-<li><a href="#create-an-api-key">Create an API key</a> (optional)</li>
-<li>Required for testing submission with the CI pipeline</li>
-<li><a href="../ci-cd/">Prepare the CI to run from your fork</a> (optional)</li>
-<li>Required to run integration testing on forks of this repo.</li>
-</ol>
-<h3 id="git-leaks-detection">Git leaks detection</h3>
-<p>Since the repository contains secret information in form of encrypted
-Ansible Vault there is high chance that developer may push a commit with
-decrypted secrets by mistake. To avoid this problem we recommend
-to use <code>Gitleaks</code> tool that prevent you from commit secret code into git history.</p>
-<p>The repository is already pre-configured but each developer has to make final
-config changes in his/her environment.</p>
-<p>Follow the <a href="https://github.com/gitleaks/gitleaks#pre-commit">documentation</a> to
-configure Gitleaks on your computer.</p>
-<h3 id="prepare-a-development-environment">Prepare a Development Environment</h3>
-<p>You may use any OpenShift 4.7+ cluster (including <a href="#using-codeready-containers">CodeReady Containers</a>).</p>
-<p>The hosted and release pipelines require a considerable amount of dependencies which
-are tedious to <a href="../pipeline-env-setup/">configure manually</a>. Luckily these
-steps have been automated and can be executed by anyone with access to the Ansible
-vault password.</p>
-<p>Before running this you should ensure you're logged into the correct OpenShift
-cluster using <code>oc</code>. If already logged into the OpenShift console, an <code>oc</code> login
-command can be obtained by clicking on your username in upper right corner, and
-selecting <code>copy login command</code>.</p>
-<pre><code class="language-bash">ansible-playbook -v \
-  -i &quot;ansible/inventory/operator-pipeline-$ENV&quot; \
-  -e &quot;oc_namespace=$NAMESPACE&quot; \
-  -e &quot;ocp_token=`oc whoami -t`&quot; \
-  --vault-password-file $VAULT_PASSWORD_PATH \
-  ansible/playbooks/deploy.yml
+<h2 id="architecture">Architecture</h2>
+<pre><code>┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   GitHub        │    │   Webhook        │    │   PostgreSQL    │
+│   Webhooks      │───▶│   Dispatcher     │───▶│   Database      │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+                                │
+                                ▼
+                       ┌──────────────────┐
+                       │   Tekton         │
+                       │   Pipelines      │
+                       └──────────────────┘
 </code></pre>
-<p>:warning: Conflicts may occur if the project already contains some resources.
-They may need to be removed first.</p>
-<p>Cleanup can be performed by specifying the <code>absent</code> state for some of the resources.</p>
-<pre><code class="language-bash">ansible-playbook -v \
-  -i &quot;ansible/inventory/operator-pipeline-$ENV&quot; \
-  -e &quot;oc_namespace=$NAMESPACE&quot; \
-  -e &quot;ocp_token=`oc whoami -t`&quot; \
-  -e &quot;namespace_state=absent&quot; \
-  -e &quot;github_webhook_state=absent&quot; \
-  --vault-password-file $VAULT_PASSWORD_PATH \
-  ansible/playbooks/deploy.yml
-</code></pre>
-<h4 id="integration-tests">Integration tests</h4>
-<p>See <a href="../ci-cd/#integration-tests">integration tests section in ci-cd.md</a></p>
-<h4 id="install-tkn">Install tkn</h4>
-<p>You should install the <a href="https://docs.openshift.com/container-platform/4.7/cli_reference/tkn_cli/installing-tkn.html">tkn</a>
-CLI which corresponds to the version of the cluster you're utilizing.</p>
-<h4 id="using-codeready-containers">Using CodeReady Containers</h4>
-<p>It's possible to deploy and test the pipelines from a CodeReady Containers (CRC)
-cluster for development/testing, purposes.</p>
-<ol>
-<li>
-<p>Install <a href="https://code-ready.github.io/crc/#installation_gsg">CodeReady Containers</a></p>
-</li>
-<li>
-<p>Install <a href="https://docs.openshift.com/container-platform/4.7/cicd/pipelines/installing-pipelines.html">OpenShift Pipelines</a></p>
-</li>
-<li>
-<p>Login to your cluster with <code>oc</code> CLI.</p>
-<p>You can run <code>crc console --credentials</code> to get the admin login command.</p>
-</li>
-<li>
-<p>Create a test project in your cluster</p>
-<p><code>bash
-oc new-project playground</code></p>
-</li>
-<li>
-<p>Grant the <code>privileged</code> SCC to the default <code>pipeline</code> service account.</p>
-<p>The <code>buildah</code> task requires the <code>privileged</code> security context constraint
-in order to call <code>newuidmap</code>/<code>newgidmap</code>. This is only necessary because
-<code>runAsUser:0</code> is defined in <code>templates/crc-pod-template.yml</code>.</p>
-<p><code>bash
-oc adm policy add-scc-to-user privileged -z pipeline</code></p>
-</li>
-</ol>
-<h5 id="running-a-pipeline-with-crc">Running a Pipeline with CRC</h5>
-<p>It may be necessary to pass the following <code>tkn</code> CLI arg to avoid
-permission issues with the default CRC PersistentVolumes.</p>
-<pre><code class="language-bash">--pod-template templates/crc-pod-template.yml
-</code></pre>
-<h4 id="prepare-a-certification-project">Prepare a Certification Project</h4>
-<p>A certification project is required for executing all pipelines.
-In order to avoid collisions with other developers, it's best to
-create a new one in the corresponding Pyxis environment.</p>
-<p>The pipelines depend on the following certification project fields:</p>
-<pre><code class="language-jsonc">{
-  &quot;project_status&quot;: &quot;active&quot;,
-  &quot;type&quot;: &quot;Containers&quot;,
-
-  // Arbitrary name for the project - can be almost anything
-  &quot;name&quot;: &quot;&lt;insert-project-name&gt;&quot;,
-
-  /*
-   Either &quot;connect&quot;, &quot;marketplace&quot; or &quot;undistributed&quot;.
-   This maps to the `organization` field in the bundle submission repo's config.yaml.
-     connect -&gt; certified-operators
-     marketplace -&gt; redhat-marketplace
-     undistributed -&gt; certified-operators (certified against, but not distributed to)
-  */
-  &quot;operator_distribution&quot;: &quot;&lt;insert-distribution&gt;&quot;,
-
-  // Must correspond to a containerVendor record with the same org_id value.
-  &quot;org_id&quot;: &lt;insert-org-id&gt;,
-
-  &quot;container&quot;: {
-    &quot;type&quot;: &quot;operator bundle image&quot;,
-
-    &quot;build_catagories&quot;:&quot;Operator bundle&quot;,
-
-    // Required but always &quot;rhcc&quot;
-    &quot;distribution_method&quot;: &quot;rhcc&quot;,
-
-    // Always set to true to satisfy the publishing checklist
-    &quot;distribution_approval&quot;: true,
-
-    // Must match the github user(s) which opened the test pull requests
-    &quot;github_usernames&quot;: [&quot;&lt;insert-github-username&gt;&quot;],
-
-    // Must be unique for the vendor
-    &quot;repository_name&quot;: &quot;&lt;insert-repo-name&gt;&quot;
-  }
-}
-</code></pre>
-<h4 id="prepare-an-operator-bundle">Prepare an Operator Bundle</h4>
-<p>You can use a utility script to copy an existing bundle. By default it will copy
-a bundle that should avoid common failure conditions such as digest pinning.
-View all the customization options by passing <code>-h</code> to this command.</p>
-<pre><code class="language-bash">./scripts/copy-bundle.sh
-</code></pre>
-<p>You may wish to tweak the generated output to influence the behavior of the pipelines.
-For example, Red Hat Marketplace Operator bundles may require additional annotations.
-The pipeline should provide sufficient error messages to indicate what is missing.
-If such errors are unclear, that is likely a bug which should be fixed.</p>
-<h4 id="prepare-your-ciyaml">Prepare Your ci.yaml</h4>
-<p>At the root of your operator package directory (note: <strong>not</strong> the bundle
-version directory) there needs to be a <code>ci.yaml</code> file. For development
-purposes, it should follow this format in most cases.</p>
-<pre><code class="language-yaml">---
-# Copy this value from the _id field of the certification project in Pyxis.
-cert_project_id: &lt;pyxis-cert-project-id&gt;
-# Set this to true to allow the hosted pipeline to merge pull requests.
-merge: false
-</code></pre>
-<h4 id="create-a-bundle-pull-request">Create a Bundle Pull Request</h4>
-<p>It's recommended to open bundle pull requests against the
-<a href="https://github.com/redhat-openshift-ecosystem/operator-pipelines-test">operator-pipelines-test</a>
-repo. The pipeline GitHub bot account has permissions to manage it.</p>
-<blockquote>
-<p><strong>Note:</strong> This repository is only configured for testing certified operators,
-NOT Red Hat Marketplace operators (see
-<a href="https://github.com/redhat-openshift-ecosystem/operator-pipelines-test/blob/main/config.yaml"><code>config.yaml</code></a>).</p>
-</blockquote>
-<pre><code class="language-bash"># Checkout the pipelines test repo
-git clone https://github.com/redhat-openshift-ecosystem/operator-pipelines-test
-cd operator-pipelines-test
-
-# Create a new branch
-git checkout -b &lt;insert-branch-name&gt;
-
-# Copy your package directory
-cp -R &lt;package-dir&gt;/ operators/
-
-# Commit changes
-git add -A
-
-# Use this commit pattern so it defaults to the pull request title.
-# This is critical to the success of the pipelines.
-git commit -m &quot;operator &lt;operator-package-name&gt; (&lt;bundle-version&gt;)&quot;
-
-# Push your branch. Open the pull request using the output.
-git push origin &lt;insert-branch-name&gt;
-</code></pre>
-<blockquote>
-<p><strong>Note:</strong> You may need to merge the pull request to use it for testing
-the release pipeline.</p>
-</blockquote>
-<h4 id="create-an-api-key">Create an API Key</h4>
-<p><a href="https://url.corp.redhat.com/86973d1">File a ticket</a> with Pyxis admins
-to assist with this request. It must correspond to the <code>org_id</code>
-for the certification project under test.</p>
-<h2 id="making-changes-to-the-pipelines">Making Changes to the Pipelines</h2>
-<h3 id="guiding-principles">Guiding Principles</h3>
+<h2 id="features">Features</h2>
 <ul>
-<li>Avoid including credentials within Task scripts.</li>
-<li>Avoid the use of <code>set -x</code> in shell scripts which <em>could</em> expose credentials
-    to the console.</li>
-<li>Don't use workspaces for passing secrets. Use <code>secretKeyRef</code> and <code>volumeMount</code>
-  with secret and key names instead.</li>
-<li>Reason: It adds unnecessary complexity to <code>tkn</code> commands.</li>
-<li>Use images from trusted registries/namespaces.</li>
-<li>registry.redhat.io</li>
-<li>registry.access.redhat.com</li>
-<li>quay.io/redhat-isv</li>
-<li>quay.io/opdev</li>
-<li>Use image pull specs with digests instead of tags wherever possible.</li>
-<li>Tasks must implement their own skipping behavior, if needed.</li>
-<li>Reason: If a task is not executed, any dependent tasks will not be
-    executed either.</li>
-<li>Don't use ClusterTasks or upstream tasks. All tasks are defined in this repo.</li>
-<li>Document all params, especially pipeline params.</li>
-<li>Output human readable logs.</li>
-<li>Use reasonable defaults for params wherever possible.</li>
+<li><strong>Secure webhook processing</strong> with HMAC-SHA256 signature verification</li>
+<li><strong>Multi-repository support</strong> with configurable processing rules</li>
+<li><strong>Pipeline capacity management</strong> to prevent resource overload</li>
+<li><strong>Background event processing</strong> for improved performance</li>
+<li><strong>Health monitoring</strong> and status tracking</li>
 </ul>
-<h3 id="applying-pipeline-changes">Applying Pipeline Changes</h3>
-<p>You can use the following command to apply all local changes to your OCP project.
-It will add all the Tekton resources used across all the pipelines.</p>
-<pre><code class="language-bash">oc apply -R -f ansible/roles/operator-pipeline/templates/openshift
-</code></pre>
-<h2 id="making-changes-to-the-pipeline-image">Making Changes to the Pipeline Image</h2>
-<h3 id="dependency">Dependency</h3>
-<p>Operator pipelines project is configured to automatically manage Python
-dependencies using <a href="https://pdm.fming.dev/latest/">PDM</a> tool. The pdm automates definition, installation,
-upgrades and the whole lifecycle of dependency in a project. All dependencies
-are stored in <code>pyproject.toml</code> file in a groups that corresponds to individual
-applications within the Operator pipelines project.</p>
-<p>Adding, removing and updating of dependency needs to be always done
-using <code>pdm</code> cli.</p>
-<pre><code class="language-bash">pdm add -G operator-pipelines gunicorn==20.1.0
-</code></pre>
-<p>After a dependency is installed it is added to pdm.lock file. The lock file
-is always part of git repository.</p>
-<p>If you want to install specific group set of dependencies use following command:</p>
-<pre><code class="language-bash">pdm install -G operator-pipelines
-</code></pre>
-<p>Dependencies are stored into virtual environment (.venv) which is automatically
-created after <code>pdm install</code>. If .venv wasn't created, configure pdm to
-automatically create it during installation with <code>pdm config python.use_venv true</code>.</p>
-<h3 id="run-unit-tests-code-style-checkers-etc">Run Unit Tests, Code Style Checkers, etc.</h3>
-<p>Before running the tests locally, the environment needs to be prepared.
-Choose the preparation process according to your Linux version.</p>
-<h4 id="preparation-on-rpm-based-linux">Preparation on RPM-based Linux</h4>
-<pre><code class="language-bash">sudo dnf -y install hadolint
-python3 -m pip install pdm
-pdm venv create 3.13
-pdm install
-source .venv/bin/activate
-python3 -m pip install ansible-lint
-</code></pre>
-<h4 id="preparation-on-other-linux-systems">Preparation on other Linux systems</h4>
-<p>Before starting, make sure you have installed the <a href="https://brew.sh/">Brew</a> package manager.</p>
-<pre><code class="language-bash">brew install hadolint
-python3 -m pip install pdm
-pdm venv create 3.13
-pdm install
-source .venv/bin/activate
-python3 -m pip install ansible-lint
-</code></pre>
-<h4 id="run-the-local-tests">Run the local tests</h4>
-<p>To run unit tests and code style checkers:</p>
-<pre><code class="language-bash">tox
-</code></pre>
-<h3 id="local-development">Local development</h3>
-<p>Setup python virtual environment using pdm.</p>
-<pre><code class="language-shell">pdm venv create 3.13
-pdm install
-source .venv/bin/activate
-</code></pre>
-<h3 id="build-push">Build &amp; Push</h3>
+<h2 id="installation">Installation</h2>
+<h3 id="prerequisites">Prerequisites</h3>
+<ul>
+<li>Python 3.11+</li>
+<li>PostgreSQL 12+</li>
+<li>Kubernetes/OpenShift cluster access</li>
+</ul>
+<h3 id="setup">Setup</h3>
 <ol>
-<li>
-<p>Ensure you have <a href="https://github.com/containers/buildah/blob/main/install.md">buildah</a>
-   installed</p>
-</li>
-<li>
-<p>Build the image</p>
-<p><code>bash
-buildah bud</code></p>
-</li>
-<li>
-<p>Push the image to a remote registry, eg. Quay.io.</p>
-<p><code>bash
-buildah push &lt;image-digest-from-build-step&gt; &lt;remote-repository&gt;</code></p>
-<p>This step may require login, eg.</p>
-<p><code>bash
-buildah login quay.io</code></p>
-</li>
+<li>Install dependencies:</li>
 </ol>
+<pre><code class="language-bash">pdm install --no-dev
+</code></pre>
+<ol>
+<li>Create database:</li>
+</ol>
+<pre><code class="language-bash">docker compose up -d
+</code></pre>
+<ol>
+<li>Set environment variables:</li>
+</ol>
+<pre><code class="language-bash">export DATABASE_URL=&quot;postgresql://webhook_user:secure_password@localhost:5432/webhook_dispatcher&quot;
+export GITHUB_WEBHOOK_SECRET=&quot;your_github_webhook_secret&quot;
+</code></pre>
+<h2 id="configuration">Configuration</h2>
+<p>Create a <code>dispatcher_config.yaml</code> file:</p>
+<pre><code class="language-yaml">---
+dispatcher:
+  items:
+    - name: &quot;Community Operators&quot;
+      events:
+        - opened
+        - synchronize
+        - ready_for_review
+      full_repository_name: &quot;redhat-openshift-ecosystem/community-operators&quot;
+      capacity:
+        type: ocp_tekton
+        pipeline_name: &quot;operator-hosted-pipeline&quot;
+        max_capacity: 5
+        namespace: &quot;operator-pipeline-prod&quot;
+      # Tekton pipeline listener URL
+      callback_url: &quot;https://tekton-dashboard.example.com/api/v1/trigger&quot;
+
+security:
+  github_webhook_secret: &quot;${GITHUB_WEBHOOK_SECRET}&quot;
+  verify_signatures: true
+  allowed_github_events:
+    - pull_request
+</code></pre>
+<h3 id="configuration-parameters">Configuration Parameters</h3>
+<ul>
+<li><strong>name</strong>: Configuration identifier</li>
+<li><strong>events</strong>: GitHub PR events to process</li>
+<li><strong>full_repository_name</strong>: Repository in <code>owner/repo</code> format</li>
+<li><strong>capacity</strong>: Pipeline capacity settings</li>
+<li><strong>callback_url</strong>: Tekton pipeline trigger URL</li>
+<li><strong>github_webhook_secret</strong>: Webhook signature verification secret</li>
+</ul>
+<h2 id="usage">Usage</h2>
+<h3 id="running-the-service">Running the Service</h3>
+<p>Production mode:</p>
+<pre><code class="language-bash">export WEBHOOK_DISPATCHER_CONFIG=&quot;/path/to/dispatcher_config.yaml&quot;
+python -m operatorcert.webhook_dispatcher.main
+</code></pre>
+<h3 id="github-webhook-setup">GitHub Webhook Setup</h3>
+<ol>
+<li>Go to repository <strong>Settings</strong> → <strong>Webhooks</strong></li>
+<li>Add webhook with:</li>
+<li><strong>URL</strong>: <code>https://your-domain.com/api/v1/webhooks/github-pipeline</code></li>
+<li><strong>Content type</strong>: <code>application/json</code></li>
+<li><strong>Secret</strong>: Your webhook secret</li>
+<li><strong>Events</strong>: Pull requests</li>
+</ol>
+<h2 id="api-endpoints">API Endpoints</h2>
+<ul>
+<li><code>POST /api/v1/webhooks/github-pipeline</code> - Receive GitHub webhooks</li>
+<li><code>GET /api/v1/status/ping</code> - Health check</li>
+<li><code>GET /api/v1/status/db</code> - Database health</li>
+<li><code>GET /api/v1/events/status</code> - Event status with pagination</li>
+</ul>
+<h2 id="security">Security</h2>
+<ul>
+<li><strong>HMAC-SHA256 signature verification</strong> for all webhook requests</li>
+<li><strong>GitHub User-Agent validation</strong> to prevent spoofing</li>
+<li><strong>Event type filtering</strong> based on configuration</li>
+<li><strong>TLS encryption</strong> required for production deployments</li>
+</ul>
+<h2 id="monitoring">Monitoring</h2>
+<h3 id="health-checks">Health Checks</h3>
+<pre><code class="language-bash">curl http://localhost:5000/api/v1/status/ping
+curl http://localhost:5000/api/v1/status/db
+</code></pre>
+<h3 id="event-status">Event Status</h3>
+<pre><code class="language-bash">curl &quot;http://localhost:5000/api/v1/events/status?page_size=20&quot;
+</code></pre>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<h3 id="common-issues">Common Issues</h3>
+<p><strong>Signature verification failures</strong>:
+- Verify <code>GITHUB_WEBHOOK_SECRET</code> matches GitHub configuration
+- Ensure webhook uses <code>application/json</code> content type</p>
+<p><strong>Database connection errors</strong>:
+- Check <code>DATABASE_URL</code> format
+- Verify PostgreSQL is running and accessible</p>
+<p><strong>Event processing delays</strong>:
+- Check dispatcher thread logs
+- Monitor pipeline capacity usage
+- Review database performance</p>
+<h3 id="debug-mode">Debug Mode</h3>
+<pre><code class="language-bash">export LOG_LEVEL=DEBUG
+python -m operatorcert.webhook_dispatcher.main --verbose
+</code></pre>
+<p>For support, refer to the <a href="https://github.com/redhat-openshift-ecosystem/operator-pipelines">operator-pipelines repository</a>.</p>
 
 
 
